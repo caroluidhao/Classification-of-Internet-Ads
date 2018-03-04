@@ -1,0 +1,805 @@
+---
+title: "Classification Models for Internet Ads "
+author: "XLin"
+date: "November 14, 2017"
+output: pdf_document
+---
+```{r,results='hide',warning=FALSE}
+#Loading packages
+library(factoextra)
+library(ggplot2)
+library(plyr)
+library(caret)
+library(ROCR)
+library(crossval)
+library(MASS)
+library(e1071)
+library(quantmod) 
+library(nnet)
+library(ggrepel)
+
+```
+#Performance of classifivation Methods for Ad Detection
+##Read data into R
+```{r }
+setwd('D:/statistics/3rd semester/stat517/final_proj/Internet Ad/ad-dataset')
+
+inad<-read.table(file = 'ad.data', sep = ',')
+dim(inad)
+inad[1:10,1:10]
+inad[,c(1,2,3)]<-apply(inad[,c(1,2,3)],2,as.numeric)
+inad = na.omit(inad)
+
+colnames(inad)[1559] <- "Ad"
+#inad$Ad<-as.factor(ifelse(inad$Ad ==inad$Ad[1],1,0))
+inad$V4<-as.integer(inad$V4)
+#remove columns whose variance is equal to zero
+inad2=inad[,-1559]
+inad2<-inad2[,apply(inad2, 2, var, na.rm=TRUE) != 0]
+inad2=cbind(inad2,inad$Ad)
+colnames(inad2)[1431] <- "Ad"
+
+inad3<-inad2
+# standardize all continous variable
+inad2[,-1431] <- apply(inad2[,-1431],2,scale)
+
+```
+##Check The Response 
+```{r}
+Sys.time()
+#check thr response
+Non_ad  <- sum(inad2$Ad == 'nonad.')/2369
+ad <- sum(inad2$Ad == 'ad.')/2369
+
+dat <- data.frame(
+  Ad = factor(c("nonad.","ad.")),
+  percent = c(Non_ad , ad)
+)
+ggplot(data=dat, aes(x=Ad, y=percent, fill=Ad)) +
+  geom_bar(colour="black", stat="identity")
+
+```
+From the plot above, we cna see that less than 80% of the images are advertisements
+
+
+##**Principle component analysis**
+```{r,fig.height = 3, fig.width = 5}
+t= proc.time()
+ad.pca=prcomp(inad2[,-1431],scale=FALSE)
+names(ad.pca)
+#The rotation measure provides the principal component loading. 
+#Each column of rotation matrix contains the principal component loading vector
+ad.pca$rotation[1:5,1:4] #first 4 principal components and first 5 rows
+dim(ad.pca$x)
+
+# standard deviation of each principal component
+ad.sd = ad.pca$sdev
+ad.var=ad.pca$sdev^2  ##compute variance
+ad.var[1:10]
+#proportion of variance explained
+pve=ad.var/sum(ad.var)
+
+# number of components to achieve account for 80% of the total variance
+which.max(cumsum(pve)[cumsum(pve)<=0.804])
+
+#plot the principal components
+#Proportion of Variance Explained
+# the first 30 components explain about 95% of the total variability
+fviz_screeplot(ad.pca, ncp=135, choice="eigenvalue") #library(factoextra)
+
+plot(cumsum(pve), xlab="Principal Component",
+     ylab="Cumulative Proportion of Variance Explained", ylim=c(0,1),type='b')
+abline(v=135, col='red', lty=2)
+#plot the resultant principal components
+biplot(ad.pca)  
+AdClasses <- factor(inad2$Ad)
+plot(main="Different Groups",ad.pca$x[,1:135], col = AdClasses)
+
+#choose the 135 principle components as new variables 
+adnew=as.data.frame(ad.pca$x[,1:135])
+
+#levels(adnew$Ad) <- make.names(levels(factor(adnew$Ad)))
+adnew$Ad<-inad2$Ad
+
+proc.time()-t
+```
+Since the data has about 1500 variables, principle component analysis were uesd to reduced the dimension. After conducting the principle component analysis, 135 principle components account for about 80% of the total variability,
+therefore, the 135 PCs were used to train the classificatioon models
+
+
+####**Randomly divide the data set into two sets of labels 1 and 2**
+```{r}
+ptm<-proc.time() 
+#Use labels 1 as the training data set and labels 2 as the test data set
+set.seed(123)
+idx1=sample(1:2,dim(adnew)[1],repl=TRUE)
+
+ad_train<-adnew[idx1==1,]  #training set
+X_train<-ad_train[,-136]
+Y_train<-ad_train[,136]
+
+ad_test<-adnew[idx1==2,]   #testing set
+X_test<-ad_test[,-136]
+Y_test<-ad_test[,136]
+
+proc.time() - ptm
+```
+
+## Classification Methods
+
+##**Logistic Regression Analysis**
+
+```{r, results='hide', warning=FALSE}
+ptm<-proc.time() 
+set.seed(123)
+ctrl <- trainControl(method = "cv", number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+
+###  tune logistic regression
+glm.fit <- train(Ad ~ ., data = ad_train,
+                        method = "glm", family = binomial,
+                        metric = "Sens",
+                        trControl = ctrl)
+time.LR<-proc.time()-ptm
+time.LR
+```
+
+```{r,results=FALSE}
+ptm<-proc.time() 
+# using the test date to obtain predicted probabilities of Ad
+glm.pred <- predict(glm.fit, ad_test, type = "raw")
+
+table(glm.pred,ad_test$Ad)
+mean(glm.pred==ad_test$Ad)
+# Plot ROC and AUC for LR
+glm.prob<- predict(glm.fit, ad_test, type = "prob")
+
+LRPred <- prediction(glm.prob[,2], ad_test$Ad)
+LRPerf <- performance(LRPred, "tpr", "fpr")
+plot(LRPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=2, col="black")
+#AUC
+AUC.LR<-performance(LRPred, "auc")
+
+#Corresponding Performance Measures
+LR.pred <- factor(as.factor(glm.pred), c('nonad.', 'ad.'), labels = c("No-Ad", "Ad"))
+LR.Actual <- factor(as.factor(ad_test$Ad), c('nonad.', 'ad.'), labels = c("No-Ad", "Ad"))
+
+CMLR <- confusionMatrix(LR.Actual, LR.pred , negative = "No-Ad" )
+DE.LR<-diagnosticErrors(CMLR)
+DE.LR
+proc.time()-ptm
+```
+From the results and ROC curve, we can see that Logistic Regression Analysis has about 94% accuracy rate, 85% sensitivity and 96% specitivity, the ROC seemed not bad.
+
+
+##**Linear Discriminant Analysis**
+
+```{r, results='hide', warning=FALSE}
+ptm= proc.time()
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+
+###  tune logistic regression
+lda.fit <- train(Ad ~ ., data = ad_train, method = "lda", 
+                        metric = "Sens",
+                        trControl = ctrl)
+time.LDA<-proc.time() - ptm
+time.LDA
+```
+
+```{r}
+ptm= proc.time()
+lda.fit
+# using the test date to obtain predicted probabilities of Ad
+#Predict using the model
+lda.pred=predict(lda.fit, ad_test)
+
+#Accuracy of the model
+table(lda.pred,ad_test$Ad)
+mean(lda.pred==ad_test$Ad)
+
+lda.prob=predict(lda.fit, ad_test, type='prob')
+LDA_Pred <- prediction(lda.prob[,2], ad_test$Ad)
+LDA_Perf <- performance(LDA_Pred, "tpr", "fpr")
+plot(LDA_Perf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=2, col="black")
+#AUC
+AUC.LDA<-performance(LDA_Pred, "auc")
+
+#Corresponding Performance Measures
+LDA.class <- factor(as.factor(lda.pred), c('nonad.', 'ad.'), labels = c("No-Ad", "Ad"))
+LDA.Actual <- factor(as.factor(ad_test$Ad), c('nonad.', 'ad.'), labels = c("No-Ad", "Ad"))
+
+CMLDA<- confusionMatrix(LDA.Actual, LDA.class , negative = "No-Ad" )
+DE.LDA<-diagnosticErrors(CMLDA)
+DE.LDA
+proc.time() - ptm
+```
+From the results and ROC curve, we can see that Linear Discriminant Analysis has about 95% accuracy rate, 75% sensitivity and 98.8% specitivity, the ROC looks much better than the ROC of logistic regression.
+
+##**Quadratic Discriminant Analysis**
+
+```{r, results='hide', warning=FALSE}
+ptm<-proc.time() 
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+#Classify Using Quadratic Discriminant Analysis
+
+qda.fit <- train(Ad ~ ., data = ad_train, method = "qda", 
+                        metric = "Sens",
+                        trControl = ctrl)
+time.QDA<-proc.time() - ptm
+time.QDA
+```
+
+```{r}
+ptm<-proc.time() 
+qda.fit
+# using the test date to obtain predicted probabilities of Ad
+#Predict using the model
+qda.pred=predict(qda.fit, ad_test)
+#Accuracy of the model
+table(qda.pred,ad_test$Ad)
+mean(qda.pred==ad_test$Ad)
+
+qda.prob=predict(qda.fit, ad_test,type='prob')
+QDA_Pred <- prediction(qda.prob[,2], ad_test$Ad)
+QDA_Perf <- performance(QDA_Pred, "tpr", "fpr")
+plot(QDA_Perf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=2, col="black")
+#AUC
+AUC.QDA<-performance(QDA_Pred, "auc")
+
+#Corresponding Performance Measures
+QDA.class <- factor(as.factor(qda.pred), c('nonad.', 'ad.'), labels = c("No-Ad", "Ad"))
+QDA.Actual <- factor(as.factor(ad_test$Ad), c('nonad.', 'ad.'), labels = c("No-Ad", "Ad"))
+
+CMQDA<- confusionMatrix(QDA.Actual, QDA.class , negative = "No-Ad" )
+DE.QDA<-diagnosticErrors(CMQDA)
+DE.QDA
+proc.time() - ptm
+```
+From the results and ROC curve, we can see that Quadratic Discriminant Analysis has about 84% accuracy rate, 78% sensitivity and 85% specitivity, the ROC looks worse than the ROC curves of both linear Discriminant Analysis anf logistic regression.
+
+##** K Neareat Neighbor **
+```{r, results='hide', warning=FALSE}
+ptm<-proc.time() 
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+#Classify Using KNN
+knn.fit <- train(Ad ~ ., data = ad_train, method = "knn",
+                 preProcess = c("center","scale"),
+                 metric = "Sens",trControl = ctrl)
+time.KNN<-proc.time() - ptm
+time.KNN
+```
+
+```{r}
+ptm<-proc.time() 
+knn.fit
+plot(knn.fit)
+#prediction
+knn.pred2 <- predict(knn.fit, X_test)
+table(knn.pred2,Y_test)
+mean(knn.pred2==Y_test)
+# Plot ROC and AUC for KNN
+knn.prob <- predict(knn.fit, X_test, type = 'prob')
+KNNPred <- prediction(knn.prob[,2], Y_test)
+KNNPerf <- performance(KNNPred, "tpr", "fpr")
+plot(KNNPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.KNN<-performance(KNNPred, "auc")
+#Corresponding Performance Measures
+KNNPrediction <- factor(as.factor(knn.pred2),  c('nonad.', 'ad.'),labels = c("Not-Ad", "Ad"))
+KNNActual <- factor(as.factor(Y_test),  c('nonad.', 'ad.'),labels = c("Not-Ad", "Ad"))
+
+CMKNN <- confusionMatrix(KNNActual,KNNPrediction, negative = "Not-Ad" )
+DE.KNN<-diagnosticErrors(CMKNN)
+DE.KNN
+proc.time() - ptm
+```
+From the results above, the KNN model performance the best when k=5, with high accuracy and high sensitivity. 
+After using k=5 to make predictions, we can see that it has about 94% accuracy rate, 70% sensitivity and 98.6% specitivity, the ROC looks reasonably good.
+
+##**Naive Bayes **
+
+```{r,results='hide',warning=FALSE}
+ptm<-proc.time() 
+#Classification Using Naive Bayes
+set.seed(123)
+NB.fit <- train(X_train,Y_train, method = "nb",
+                trControl =trainControl(method='cv',number=10))
+#prediction
+NB.pred <- predict(NB.fit, X_test)
+NB.probs <- predict(NB.fit, X_test, type="prob")
+time.NB<-proc.time() - ptm
+time.NB
+```
+
+```{r}
+ptm<-proc.time()
+NB.fit
+
+table(NB.pred, Y_test)
+mean(NB.pred==Y_test)
+# Plot ROC and AUC for NB
+NBPred <- prediction(NB.probs[,2], Y_test)
+NBPerf <- performance(NBPred, "tpr", "fpr")
+plot(NBPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.NB<-performance(NBPred, "auc")
+
+#Corresponding Performance Measures
+NBPrediction <- factor(as.factor(NB.pred),c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+NBActual <- factor(as.factor(Y_test), c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+
+CMNB <- confusionMatrix(NBActual, NBPrediction, negative = "Not-Ad" )
+DE.NB<-diagnosticErrors(CMNB)
+DE.NB
+
+proc.time() - ptm
+```
+
+From the results and ROC curve, we can see that the Naive Bayes model has about 91% accuracy rate, 83% sensitivity and 93% specitivity, the ROC looks OK.
+
+##** Bagging **
+```{r,results='hide',warning=FALSE}
+ptm<-proc.time() 
+# Bagging 
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+#expand.grid(.mtry=135, .ntree=c(1500, 2000, 2500))
+bag.fit <- train(Ad~., data=ad_train, method="treebag", trControl=ctrl)
+
+#bag.fit <- bag(X_train, Y_train, B = 10,
+#                bagControl = bagControl(fit = ctreeBag$fit,
+#                predict = ctreeBag$pred,
+#                aggregate = ctreeBag$aggregate))
+time.BAG<-proc.time()- ptm
+time.BAG
+```
+
+```{r}
+ptm<-proc.time() 
+bag.fit
+#Bagging Prediction
+bag.pred = predict(bag.fit,newdata=X_test)
+table(bag.pred, Y_test)
+mean(bag.pred==Y_test)
+
+# Plot ROC and AUC for Bagging
+bag.prob<- predict(bag.fit,newdata=X_test,type="prob")
+BAGPred <- prediction(bag.prob[,2], Y_test)
+BAGPerf <- performance(BAGPred, "tpr", "fpr")
+plot(BAGPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.BAG<-performance(BAGPred, "auc")
+#Corresponding Performance Measures
+BAGPrediction <- factor(as.factor(bag.pred), c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+BAGActual <- factor(as.factor(Y_test),c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+
+CMBAG <- confusionMatrix(BAGActual, BAGPrediction, negative = "Not-Ad" )
+DE.BAG<-diagnosticErrors(CMBAG)
+DE.BAG
+proc.time()-ptm
+```
+From the results and ROC curve, we can see that the bagging model has about 95% accuracy rate, 82% sensitivity and 97% specitivity, the ROC looks pretty good.
+
+##**Random Forests**
+
+```{r,,results='hide',warning=FALSE}
+ptm<-proc.time() 
+# Random Search
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+#expand.grid(.mtry=c(10:15), .ntree=c(1500, 2000, 2500))
+#seq(4,16,4)
+set.seed(123)
+rf.fit <- train(Ad~., data=ad_train, method="rf",
+                tunegrid=expand.grid(.mtry=seq(0,20,5), .ntree=c(1500, 2000, 2500)),
+                trControl=ctrl)
+
+time.RF<-proc.time() - ptm
+time.RF
+```
+
+```{r}
+ptm<-proc.time()
+rf.fit
+##Random Forests Prediction
+rf.pred = predict(rf.fit,newdata=ad_test)
+table(rf.pred, Y_test)
+mean(rf.pred==Y_test)
+
+# Plot ROC and AUC for KNN
+#prob got from the predicted model
+rf.prob = predict(rf.fit,newdata=ad_test,type="prob")
+
+RFPred <- prediction(rf.prob[,2], Y_test)
+RFPerf <- performance(RFPred, "tpr", "fpr")
+plot(RFPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.RF<-performance(RFPred, "auc")
+
+#Corresponding Performance Measures
+RFPrediction <- factor(as.factor(rf.pred),
+                       c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+RFActual <- factor(as.factor(Y_test), 
+                   c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+
+CMRF <- confusionMatrix(RFActual, RFPrediction, negative = "Not-Ad" )
+DE.RF<-diagnosticErrors(CMRF)
+DE.RF
+
+proc.time()-ptm
+```
+From the results above, the Random Forests model performance better when mtry = 2. 
+After using the model to make predictions, we can see that it has about 95% accuracy rate, 72% sensitivity and 99.6% specitivity, the ROC looks pretty good.
+
+##**Boosting**
+```{r,results='hide',warning=FALSE}
+ptm<-proc.time() 
+# Boosting fit
+set.seed(123)
+fitControl = trainControl(method="cv", number=10,  summaryFunction=defaultSummary)
+
+#Using the caret package the get the model preformance in the best iteration.
+boost.model = train(Ad~., data=ad_train, method="gbm",distribution="bernoulli",
+                    trControl=fitControl, verbose=F,
+                    tuneGrid=data.frame(.n.trees=seq(50,1000,50), .shrinkage=0.01,
+                                        .interaction.depth=1, .n.minobsinnode=1))
+
+time.BOOST<-proc.time() -ptm
+time.BOOST
+```
+
+```{r}
+ptm<-proc.time()
+boost.model
+#Boosting to predict on test dataset
+boost.pred <- predict(boost.model, newdata =ad_test)
+table(boost.pred, ad_test$Ad)
+mean(boost.pred==ad_test$Ad)
+
+# Plot ROC and AUC for KNN
+#prob got from the predicted model
+boost.prob =predict(boost.model, newdata =ad_test, type='prob')
+
+BOOSTPred <- prediction(boost.prob[,2], ad_test$Ad)
+BOOSTPerf <- performance(BOOSTPred, "tpr", "fpr")
+plot(BOOSTPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.BOOST<-performance(BOOSTPred, "auc")
+
+#Corresponding Performance Measures
+BOOSTPrediction <- factor(as.factor(boost.pred),
+                          c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+BOOSTActual <- factor(as.factor(ad_test$Ad), c('nonad.', 'ad.'), 
+                      labels = c("Not-Ad", "Ad"))
+
+CMBOOST <- confusionMatrix(BOOSTActual, BOOSTPrediction, negative = "Not-Ad" )
+DE.BOOST<-diagnosticErrors(CMBOOST)
+DE.BOOST
+
+proc.time()-ptm
+```
+From the results above, the Boosting model performance better when n.trees = 900. 
+After using the model to make predictions, we can see that it has about 96% accuracy rate, 81% sensitivity and 98.6% specitivity, the ROC also looks pretty good.
+
+##**Support Vector Machines:linear kernel**
+
+```{r,results='hide',warning=FALSE}
+ptm<-proc.time()
+#SVM classifier:linear kernel
+#Linear Kernel
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+svm.Linear <- train(Ad~.,data=ad_train, method = "svmLinear",
+                 trControl=ctrl,
+                 preProcess = c("center", "scale"),tuneGrid = expand.grid(
+                    C = c(0.01,1,10,100,1000)))
+# perform cross-validation using tune() to select the best choice of ?? and cost for an SVM 
+#set.seed(1)
+#linear.tune.out=tune(svm,Ad~.,data=ad_train,kernel="linear",
+#              ranges=list(cost=c(0.01,1,10,100,1000)))
+#summary(linear.tune.out)
+#linear.bestmod=linear.tune.out$best.model
+
+time.SVM.L<-proc.time()-ptm
+time.SVM.L
+```
+
+```{r}
+ptm<-proc.time()
+svm.Linear
+#make predictions using this best model 
+svm.linear.pred <- predict(svm.Linear, newdata = ad_test)
+
+table(svm.linear.pred, Y_test)
+mean(svm.linear.pred==Y_test)
+
+# Plot ROC and AUC for SVM
+svm.linear.fit=svm(Ad~., data=ad_train, kernel="linear", cost=10, probability=TRUE)
+
+svm.linear.prob <- predict(svm.linear.fit, newdata = ad_test, probability=TRUE)
+head(attr(svm.linear.prob, "probabilities"))
+
+SVMPred <- prediction(attr(svm.linear.prob, "probabilities")[,2], Y_test)
+SVMPerf <- performance(SVMPred, "tpr", "fpr")
+plot(SVMPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.SVM.L<-performance(SVMPred, "auc")
+
+#Corresponding Performance Measures
+SVMPrediction <- factor(as.factor(svm.linear.pred),
+                        c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+SVMActual <- factor(as.factor(Y_test), c('nonad.', 'ad.'), 
+                    labels = c("Not-Ad", "Ad"))
+
+CMSVM.L<- confusionMatrix(SVMActual, SVMPrediction, negative = "Not-Ad" )
+DE.SVM.L<-diagnosticErrors(CMSVM.L)
+DE.SVM.L
+
+proc.time()-ptm
+```
+From the results above, the Support Vector Machines with linear kernel perform better when C = 0.01. 
+After using the model to make predictions, we can see that it has about 96% accuracy rate, 82% sensitivity and 98.9% specitivity, the ROC also looks pretty good.
+
+##**Support Vector Machines:radial kernel**
+```{r,results='hide',warning=FALSE}
+ptm<-proc.time()
+#SVM classifier:gausssian kernel
+set.seed(123)
+ctrl <- trainControl(method = "cv",  number=10,
+                     summaryFunction = twoClassSummary,
+                     classProbs = TRUE,
+                     savePredictions = TRUE)
+svm.Gaussian <- train(Ad~.,data=ad_train, method = "svmRadial",
+                 trControl=ctrl,preProcess = c("center", "scale"),
+                 tuneGrid = expand.grid(sigma=c(0.5,1,2,3,4),
+                    C = c(0.1,1,10,100,1000)))
+## perform cross-validation using tune() to select the best choice of ?? and cost for an SVM 
+#set.seed(1)
+#gaussian.tune.out=tune(svm, Ad~., data=ad_train, kernel="radial",
+#              ranges=list(cost=c(0.1,1,10,100,1000),gamma=c(0.5,1,2,3,4)))
+#summary(gaussian.tune.out)
+#gaussian.bestmod=gaussian.tune.out$best.model
+time.SVM.G<-proc.time()-ptm
+time.SVM.G
+```
+
+```{r}
+ptm<-proc.time()
+svm.Gaussian
+#make predictions using this best model 
+svm.gaussian.pred <- predict(svm.Gaussian, newdata = ad_test)
+
+table(svm.gaussian.pred, Y_test)
+mean(svm.gaussian.pred==Y_test)
+
+# Plot ROC and AUC for SVM
+svm.gaussian.fit=svm(Ad~., data=ad_train, kernel="radial", cost=10,gamma=0.5, probability=TRUE)
+
+svm.gaussian.prob <- predict(svm.gaussian.fit, newdata = ad_test, probability=TRUE)
+head(attr(svm.linear.prob, "probabilities"))
+
+SVMPred.g <- prediction(attr(svm.gaussian.prob, "probabilities")[,2], Y_test)
+SVMPerf.g <- performance(SVMPred.g, "tpr", "fpr")
+plot(SVMPerf.g, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=3, col="black")
+#AUC
+AUC.SVM.G<-performance(SVMPred.g, "auc")
+
+#Corresponding Performance Measures
+SVMPrediction.g <- factor(as.factor(svm.gaussian.pred),
+                          c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+SVMActual.g <- factor(as.factor(Y_test), c('nonad.', 'ad.'),
+                      labels = c("Not-Ad", "Ad"))
+
+CMSVM.G <- confusionMatrix(SVMActual.g, SVMPrediction.g, negative = "Not-Ad" )
+DE.SVM.G<-diagnosticErrors(CMSVM.G)
+DE.SVM.G
+
+proc.time()-ptm
+```
+From the results above, the Support Vector Machines with gaussian kernel perform better when  sigma = 0.5 and C = 1. 
+After using the model to make predictions, we can see that it has about 90% accuracy rate, 44% sensitivity and 98.9% specitivity, the ROC  looks OK.
+
+##**Neural Network**
+```{r,results='hide',warning=FALSE}
+ptm<-proc.time()
+
+set.seed(123)
+nnctrl <- trainControl(method = 'cv', number = 10,savePredictions = TRUE,
+                       classProbs = TRUE,  summaryFunction = twoClassSummary)
+#Neural Network
+
+NN.fit <- train(Ad ~., data = ad_train, method = 'nnet', 
+                preProcess = c('center', 'scale'), trControl = nnctrl,
+                paramGrid=expand.grid(decay = c(0.5, 0.1), size = c(5, 6, 7)))
+
+time.NN<-proc.time()-ptm
+time.NN
+```
+
+```{r}
+ptm<-proc.time()
+NN.fit
+#make prediction
+NN.pred <- predict(NN.fit, newdata=ad_test)
+
+table(NN.pred, Y_test)
+mean(NN.pred==Y_test)
+
+# Plot ROC and AUC for KNN
+#prob got from the predicted model
+NN.probs <- predict(NN.fit, newdata=ad_test, type='prob')
+
+NNPred <- prediction(NN.probs[,2], ad_test$Ad)
+NNPerf <- performance(NNPred, "tpr", "fpr")
+plot(NNPerf, colorize=TRUE)
+abline(a=0, b=1, lty=2, lwd=2, col="black")
+#AUC
+AUC.NN<-performance(NNPred, "auc")
+
+#Corresponding Performance Measures
+NNPrediction <- factor(as.factor(NN.pred), c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+NNActual <- factor(as.factor(ad_test$Ad), c('nonad.', 'ad.'), labels = c("Not-Ad", "Ad"))
+
+CMNN <- confusionMatrix(NNActual, NNPrediction, negative = "Not-Ad" )
+DE.NN<-diagnosticErrors(CMNN)
+DE.NN
+
+proc.time()-ptm
+```
+From the results above, the Neural Network model perform better when size = 3 and decay = 0.1. 
+After using the model to make predictions, we can see that it has about 96% accuracy rate, 84% sensitivity and 98.3% specitivity, the ROC looks very good.
+
+##**Summary of Performance Measures For All Models**
+```{r}
+ptm<-proc.time() 
+# prediction accuracy
+DiagnosticErrors <- rbind(DE.LR,DE.LDA,DE.QDA,DE.KNN,DE.NB,
+                  DE.BAG,DE.RF,DE.BOOST,DE.SVM.L,DE.SVM.G,DE.NN)
+rownames(DiagnosticErrors) <- (c("LR" , 	"LDA" , "QDA" ,	
+                                 "KNN" ,	"Naive_Bayes" , 	"Bagging" , 
+                                 "Random_Forest" , 	"Boosted" , 	"SVM(linear)" ,
+                                 "SVM(Gaussian)",'Neural Network'))
+colnames(DiagnosticErrors)<-c('Accuracy','Sensitivity','Specificity',
+                              'PPV','NPV','Log-odds Ratio')
+DiagnosticErrors<-DiagnosticErrors[,-6]
+round(DiagnosticErrors, 4)
+proc.time() - ptm
+#Accuracy
+plot(DiagnosticErrors[,1], type='b',col= 1,xlab= 'model',ylab='Accuracy rate',
+     ylim=c(0,1),main='Acc/Sens/Spec rate For All Models')
+#text(DiagnosticErrors[,1],pos=c(1,3,3,2,2,2,1,1,1,2,2), row.names(DiagnosticErrors),cex=0.7,col=4)
+
+lines(DiagnosticErrors[,2], pch=15,type='b',col= 2)
+text(DiagnosticErrors[,2],pos=c(1,3,3,2,2,2,1,1,1,2,1), row.names(DiagnosticErrors),cex=0.7,col=4)
+lines(DiagnosticErrors[,3], pch=8,type='b',col= 3)
+
+legend("bottomleft", legend = c("Accuracy" , 	"Sensitivity" , "Specificity" ),
+       text.font =3,cex=0.6,col =c(1,2,3),pch = c(1,15,8), xjust = 1, yjust = 1)
+
+proc.time()-ptm
+```
+From the plot above, we can see that all models have pretty high accuracy rate and specificity rate, while the accuracy rate odf the QDA model is the lowest. The sencitivity rate of the Support Vector Machine using Gaussianl kernel is the lowest, which means the model is not good at identify true potisitve (Ad).
+
+##ROC Curves For All Models
+```{r}
+ptm<-proc.time()
+plot(LRPerf, col=4,lwd=2,main='ROC Curves For All Models')
+plot(LDA_Perf,add=TRUE, col=2, lwd=2)
+plot(QDA_Perf,add=TRUE, col=7, lwd=2)
+plot(KNNPerf,add=TRUE, col=8, lwd=2)
+plot(NBPerf,add=TRUE, col=6, lwd=2)
+plot(BAGPerf,add=TRUE, col=1, lwd=2)
+plot(RFPerf,add=TRUE, col=3, lwd=2)
+plot(BOOSTPerf,add=TRUE, col=5, lwd=2)
+plot(SVMPerf,add=TRUE, col=1, lty=2, lwd=2)
+plot(SVMPerf.g,add=TRUE, col=2,lty=2, lwd=2)
+plot(NNPerf,add=TRUE, col=4,lty=2, lwd=2)
+abline(a=0, b=1, lty=2, lwd=2, col="black")
+legend("bottomright", legend = c("LR" , 	"LDA" , "QDA" ,	"KNN" ,	"NB" , 
+                                 "Bagging" , 	"RF" , 	"Boosted" , 	"SVP(linear)",
+                                 "SVP(Gaussian)",'NNet'), lwd=2,text.font =3,
+       cex=0.8,col =c(4,2,7,8,6,1,3,5,1,2,4),
+       lty = c(1,1,1,1,1,1,1,1,2,2,2), xjust = 1, yjust = 1)
+
+proc.time()-ptm
+```
+ROC curves of the models show that Neural network,Random Forest, LDA and Bagging outperform other models.
+
+```{r}
+
+#Accuracy
+Accuracy <- c(DE.LR[1],	DE.LDA[1],	DE.QDA[1],	DE.KNN[1],
+              DE.NB[1],	DE.BAG[1], DE.RF[1],	DE.BOOST[1],
+              DE.SVM.L[1],	DE.SVM.G[1],DE.NN[1])
+#Sensitivity
+Sensitivity <- c(DE.LR[2],	DE.LDA[2],	DE.QDA[2],	DE.KNN[2],
+                 DE.NB[2],	DE.BAG[2], DE.RF[2],	DE.BOOST[2],
+                 DE.SVM.L[2],	DE.SVM.G[2],DE.NN[2])
+#Specificity
+Specificity <- c(DE.LR[3],	DE.LDA[3],	DE.QDA[3],	DE.KNN[3],
+                 DE.NB[3],	DE.BAG[3], DE.RF[3],	DE.BOOST[3],
+                 DE.SVM.L[3],	DE.SVM.G[3],DE.NN[3])
+
+#Positive predicted values
+PPV <- c(DE.LR[4],	DE.LDA[4],	DE.QDA[4],	DE.KNN[4],	
+         DE.NB[4],	DE.BAG[4], DE.RF[4],	DE.BOOST[4],
+         DE.SVM.L[4],	DE.SVM.G[4],DE.NN[4])
+
+Model<- c("Logistic_Regression" , 	"Linear_Discriminant" , 
+          "Quadrastic_Discriminant" ,	"KNN" ,	"Naive_Bayes" , 
+          "Bagging" , 	"Random_Forest" , 	"Boosting" , 
+          "Support_Vector_Machine(linear)" ,
+          "Support_Vector_Machine(Gaussian)",'Neural Network')
+
+## PLoting Accuracy, Sensitivity and,Specificity  from all models
+df1 <- data.frame(col1=Accuracy, col2= Sensitivity,col3= Model)
+df2 <- data.frame(col1=Accuracy, col2= Specificity , col3= Model)
+
+Sys.time()
+```
+
+```{r}
+#Accuracy vs Sensitivity 
+ggplot(df1, aes(x=Accuracy, y=Sensitivity, color = Model , label = Model )) + 
+  ##geom_point(aes(size=17.5))+
+  geom_point() +geom_label_repel(aes(label=Model))
+#Accuracy vs Specificity 
+ggplot(df2, aes(x=Accuracy, y=Specificity, color = Model , label = Model )) + 
+  ##geom_point(aes(size=17.5))+
+  geom_point() +geom_label_repel(aes(label=Model))
+```
+Both the 'Accuracy vs Sensitivity' and 'Accuracy vs Specificity' show that most of the models perform pretty well at predicting the internet ads, especially Neural Network, Support Vector Machine with linear kernel, and Boosting.
+
+###Time for Training the Fitted Model
+```{r}
+ptm<-proc.time()
+# prediction accuracy
+train.time <- rbind(time.LR,time.LDA,time.QDA,time.KNN,time.NB,
+                 time.BAG,time.RF,time.BOOST,time.SVM.L,time.SVM.G,time.NN)
+rownames(train.time) <- (c("LR" , 	"LDA" , "QDA" ,	"KNN" ,	
+                           "Naive_Bayes" , 	"Bagging" , 	"Random_Forest" ,
+                           "Boosted" , 	"SVM(linear)" ,	"SVM(Gaussian)",
+                           'Neural Network'))
+proc.time() - ptm
+train.time <- train.time[,c(1:3)]
+#Accuracy
+plot(train.time[,3], type='b',col= 1,xlab= 'model',ylab='AUC',
+     main='Time for Training the Fitted Model')
+text(train.time[,3],pos=c(3,3,3,3,2,2,1,1,1,4,2),row.names(train.time),cex=0.7,col=4)
+
+proc.time()-ptm
+```
+The plot above shows the time used to train each model, SVM(linear) is the most computational expensive, models like SVM(gaussian), random forest and neural network are also more computational expensive than other models.
