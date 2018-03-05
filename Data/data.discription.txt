@@ -1,0 +1,11 @@
+INTERNET ADVERTISEMENTS DATASET
+
+Description: These data are from the paper Learning to remove Internet advertisements . The dataset represents a set of possible advertisements on Internet pages. The attributes encode the geometry of the image (if available) as well as phrases occuring in the URL, the image's URL and alt text, the anchor text, and words occuring near the anchor text. There are two class labels: advertisement ("ad") and not advertisement ("nonad"). The interesting about this data is that someone might wish to filter the webpages from irrelevant advertisements, as part of some preproccesing procedure (e.g. useful for subsequent classifcation of the website).
+Size:
+3279 (2821 nonads, 458 ads)
+1558 attributes (3 continuous, the rest binary)
+10 MB
+References:
+Learning to remove Internet advertisements (1999) by Kushmerick, N..
+Task: Prepare the data for mining and perform an exploratory data analysis. The data mining task is to predict whether an image is an advertisement ("ad") or not ("nonad"). As you are not given an explicit training/test split you need to decide on a reasonable way of assessing performance. You should perform feature reduction in order to significantly reduce the number of features. Consider at least two different classifiers.
+Challenges: There is an inbalance of the number of data per each class. Also the number of attributes is very high compared to the size of the dataset, which suggests that efficient feature reduction is very important. One or more of the three continuous features are missing in 28% of the data.
